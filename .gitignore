@@ -1,0 +1,7 @@
+request.py
+.venv
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.wav
