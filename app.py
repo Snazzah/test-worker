@@ -13,13 +13,14 @@ model: Optional[WhisperModel] = None
 async def load_model():
     global model
     model_name = os.getenv("MODEL_NAME", "turbo")
-    device_type = os.getenv("DEVICE_TYPE", "cpu")
+    device_type = os.getenv("DEVICE_TYPE", "cuda") # "cpu", "cuda", "auto"
+    compute_type = os.getenv("COMPUTE_TYPE", "float16") # https://opennmt.net/CTranslate2/quantization.html
     print(f"Loading model: {model_name}...")
     try:
         model = WhisperModel(
             model_name,
             device=device_type,
-            compute_type="float16" if device_type == "cuda" else "int8",
+            compute_type=compute_type,
         )
         print(f"Model {model_name} loaded successfully.")
     except Exception as e:
@@ -44,15 +45,6 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Whisper Load Balancer", lifespan=lifespan)
 
-# Define request models
-class GenerationRequest(BaseModel):
-    prompt: str
-    max_tokens: int = 100
-    temperature: float = 0.7
-
-class GenerationResponse(BaseModel):
-    generated_text: str
-
 class TranscriptionRequest(BaseModel):
     audio_buffers: list[str]
 
@@ -67,16 +59,6 @@ async def health_check():
         )
 
     return {"status": "healthy"}
-
-@app.post("/generate", response_model=GenerationResponse)
-async def generate(request: GenerationRequest):
-    global request_count
-    request_count += 1
-
-    # A simple mock implementation; we'll replace this with an actual model later
-    generated_text = f"Response to: {request.prompt} (request #{request_count})"
-
-    return {"generated_text": generated_text}
 
 @app.post("/transcribe")
 async def transcribe(request: TranscriptionRequest):
@@ -99,7 +81,7 @@ async def transcribe(request: TranscriptionRequest):
             model.transcribe(
                 audio_file,
                 task="transcribe",
-                log_progress=True,
+                # log_progress=True,
                 # beam_size=5,
                 # best_of=5,
                 # patience=1,
