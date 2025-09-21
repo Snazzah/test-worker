@@ -1,7 +1,9 @@
 import base64
-import tempfile
 from contextlib import asynccontextmanager
+import tempfile
 import os
+import threading
+import asyncio
 from typing import Optional
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -13,8 +15,8 @@ model: Optional[WhisperModel] = None
 async def load_model():
     global model
     model_name = os.getenv("MODEL_NAME", "turbo")
-    device_type = os.getenv("DEVICE_TYPE", "cuda") # "cpu", "cuda", "auto"
-    compute_type = os.getenv("COMPUTE_TYPE", "float16") # https://opennmt.net/CTranslate2/quantization.html
+    device_type = os.getenv("DEVICE_TYPE", "cuda")  # "cpu", "cuda", "auto"
+    compute_type = os.getenv("COMPUTE_TYPE", "float16")  # https://opennmt.net/CTranslate2/quantization.html
     print(f"Loading model: {model_name}...")
     try:
         model = WhisperModel(
@@ -32,11 +34,17 @@ def base64_to_tempfile(base64_file: str) -> str:
         temp_file.write(base64.b64decode(base64_file))
 
     return temp_file.name
-    
+
+def _start_loader_thread():
+    try:
+        asyncio.run(load_model())
+    except Exception as e:
+        print(f"Background model loader failed: {e}")
+
+threading.Thread(target=_start_loader_thread, daemon=True).start()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    await load_model()
     yield
 
     global model
