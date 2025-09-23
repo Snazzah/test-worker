@@ -9,6 +9,8 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from faster_whisper import WhisperModel
 from pydantic import BaseModel
+from urllib.parse import urlparse
+import urllib.request
 
 model: Optional[WhisperModel] = None
 
@@ -82,9 +84,27 @@ async def transcribe(request: TranscriptionRequest):
             status_code=503
         )
 
-    audio_files = [base64_to_tempfile(b64) for b64 in request.audio_buffers]
+    def buffer_to_tempfile(buf: str) -> str:
+        try:
+            parsed = urlparse(buf)
+            if parsed.scheme in ("http", "https") and parsed.netloc:
+                suffix = os.path.splitext(parsed.path)[1] or ".wav"
+                with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tf, urllib.request.urlopen(buf, timeout=30) as resp:
+                    while True:
+                        chunk = resp.read(8192)
+                        if not chunk:
+                            break
+                        tf.write(chunk)
+                return tf.name
+        except Exception:
+            pass
+
+        return base64_to_tempfile(buf)
+
+    audio_files = [buffer_to_tempfile(b64_or_url) for b64_or_url in request.audio_buffers]
     results = []
     for audio_file in audio_files:
+        # print(audio_file)
         segments, info = list(
             model.transcribe(
                 audio_file,
