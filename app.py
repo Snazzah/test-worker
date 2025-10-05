@@ -5,7 +5,7 @@ import os
 import threading
 import asyncio
 from typing import Optional
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, Header, HTTPException, status
 from fastapi.responses import JSONResponse
 from faster_whisper import WhisperModel
 from pydantic import BaseModel
@@ -58,9 +58,30 @@ app = FastAPI(title="Whisper Load Balancer", lifespan=lifespan)
 class TranscriptionRequest(BaseModel):
     audio_buffers: list[str]
 
+async def verify_api_key(authorization: Optional[str] = Header(None)):
+    """
+    If API_KEY env var is set, require the same key in the Authorization header.
+    Accepts the raw key or 'Bearer <key>'.
+    """
+    api_key = os.getenv("API_KEY")
+    # If no API_KEY is configured, skip verification
+    if not api_key:
+        return
+
+    if not authorization:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+
+    # Accept the raw key or "Bearer <key>"
+    if authorization == api_key:
+        return
+    if authorization.startswith("Bearer ") and authorization.split(" ", 1)[1] == api_key:
+        return
+
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+
 request_count = 0
 
-@app.get("/ping")
+@app.get("/ping", dependencies=[Depends(verify_api_key)])
 async def health_check():
     if model is None:
         return JSONResponse(
@@ -70,7 +91,7 @@ async def health_check():
 
     return {"status": "healthy"}
 
-@app.post("/transcribe")
+@app.post("/transcribe", dependencies=[Depends(verify_api_key)])
 async def transcribe(request: TranscriptionRequest):
     global request_count, model
     request_count += 1
@@ -141,7 +162,7 @@ async def transcribe(request: TranscriptionRequest):
     return {"results": results}
 
 # A simple endpoint to show request stats
-@app.get("/stats")
+@app.get("/stats", dependencies=[Depends(verify_api_key)])
 async def stats():
     return {"total_requests": request_count}
 
