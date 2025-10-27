@@ -149,7 +149,8 @@ async def transcribe(request: TranscriptionRequest):
             )
         )
         results.append({
-            "text": " ".join([segment.text.lstrip() for segment in segments])
+            "text": " ".join([segment.text.lstrip() for segment in segments]),
+            "duration": info.duration
         })
     
     for path in audio_files:
