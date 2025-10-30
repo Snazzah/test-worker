@@ -13,6 +13,8 @@ from urllib.parse import urlparse
 import urllib.request
 
 model: Optional[WhisperModel] = None
+CONCURRENCY = int(os.getenv("TRANSCRIBE_CONCURRENCY", os.getenv("CONCURRENCY", "2")))
+transcribe_semaphore = asyncio.Semaphore(CONCURRENCY)
 
 async def load_model():
     global model
@@ -37,6 +39,68 @@ def base64_to_tempfile(base64_file: str) -> str:
 
     return temp_file.name
 
+def buffer_or_url_to_tempfile(buf: str) -> str:
+    """
+    Accepts either a base64-encoded audio string or an HTTP/HTTPS URL to an audio file.
+    Downloads or decodes into a temporary file and returns its path.
+    """
+    try:
+        parsed = urlparse(buf)
+        if parsed.scheme in ("http", "https") and parsed.netloc:
+            suffix = os.path.splitext(parsed.path)[1] or ".wav"
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tf, urllib.request.urlopen(buf, timeout=30) as resp:
+                while True:
+                    chunk = resp.read(8192)
+                    if not chunk:
+                        break
+                    tf.write(chunk)
+            return tf.name
+    except Exception:
+        # Fall back to base64 handling if URL parsing or download fails
+        pass
+
+    return base64_to_tempfile(buf)
+
+def _run_transcribe_sync(audio_file: str) -> tuple[str, float]:
+    global model
+    if model is None:
+        raise RuntimeError("Model not loaded")
+    segments, info = model.transcribe(
+        audio_file,
+        task="transcribe",
+        # log_progress=True,
+        # beam_size=5,
+        # best_of=5,
+        # patience=1,
+        # length_penalty=None,
+        # temperature=tuple(np.arange(0, 1.0 + 1e-6, 0.2)),
+        # compression_ratio_threshold=2.4,
+        # log_prob_threshold=-1.0,
+        no_speech_threshold=0.6,
+        # condition_on_previous_text=True,
+        suppress_blank=True,
+        # suppress_tokens=[-1],
+        without_timestamps=False,
+        # max_initial_timestamp=1.0,
+        word_timestamps=False,
+        vad_filter=True,
+    )
+    text = " ".join([segment.text.lstrip() for segment in segments])
+    return text, info.duration
+
+async def transcribe_clip(b64_or_url: str) -> "TranscriptionClipResponse":
+    path = await asyncio.to_thread(buffer_or_url_to_tempfile, b64_or_url)
+    try:
+        async with transcribe_semaphore:
+            text, duration = await asyncio.to_thread(_run_transcribe_sync, path)
+        return TranscriptionClipResponse(text=text, duration=duration)
+    finally:
+        try:
+            if path and os.path.exists(path):
+                await asyncio.to_thread(os.remove, path)
+        except Exception:
+            pass
+
 def _start_loader_thread():
     try:
         asyncio.run(load_model())
@@ -57,6 +121,10 @@ app = FastAPI(title="Whisper Load Balancer", lifespan=lifespan)
 
 class TranscriptionRequest(BaseModel):
     audio_buffers: list[str]
+
+class TranscriptionClipResponse(BaseModel):
+    text: str
+    duration: float
 
 async def verify_api_key(authorization: Optional[str] = Header(None)):
     """
@@ -105,61 +173,9 @@ async def transcribe(request: TranscriptionRequest):
             status_code=503
         )
 
-    def buffer_to_tempfile(buf: str) -> str:
-        try:
-            parsed = urlparse(buf)
-            if parsed.scheme in ("http", "https") and parsed.netloc:
-                suffix = os.path.splitext(parsed.path)[1] or ".wav"
-                with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tf, urllib.request.urlopen(buf, timeout=30) as resp:
-                    while True:
-                        chunk = resp.read(8192)
-                        if not chunk:
-                            break
-                        tf.write(chunk)
-                return tf.name
-        except Exception:
-            pass
-
-        return base64_to_tempfile(buf)
-
-    audio_files = [buffer_to_tempfile(b64_or_url) for b64_or_url in request.audio_buffers]
-    results = []
-    for audio_file in audio_files:
-        # print(audio_file)
-        segments, info = list(
-            model.transcribe(
-                audio_file,
-                task="transcribe",
-                # log_progress=True,
-                # beam_size=5,
-                # best_of=5,
-                # patience=1,
-                # length_penalty=None,
-                # temperature=tuple(np.arange(0, 1.0 + 1e-6, 0.2)),
-                # compression_ratio_threshold=2.4,
-                # log_prob_threshold=-1.0,
-                no_speech_threshold=0.6,
-                # condition_on_previous_text=True,
-                suppress_blank=True,
-                # suppress_tokens=[-1],
-                without_timestamps=False,
-                # max_initial_timestamp=1.0,
-                word_timestamps=False,
-                vad_filter=True,
-            )
-        )
-        results.append({
-            "text": " ".join([segment.text.lstrip() for segment in segments]),
-            "duration": info.duration
-        })
-    
-    for path in audio_files:
-        try:
-            if path and os.path.exists(path):
-                os.remove(path)
-        except Exception:
-            pass
-
+    tasks = [transcribe_clip(b64_or_url) for b64_or_url in request.audio_buffers]
+    results_models = await asyncio.gather(*tasks)
+    results = [r.model_dump() for r in results_models]
     return {"results": results}
 
 # A simple endpoint to show request stats
