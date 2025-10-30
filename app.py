@@ -11,6 +11,9 @@ from faster_whisper import WhisperModel
 from pydantic import BaseModel
 from urllib.parse import urlparse
 import urllib.request
+from dotenv import load_dotenv
+
+load_dotenv()
 
 model: Optional[WhisperModel] = None
 CONCURRENCY = int(os.getenv("TRANSCRIBE_CONCURRENCY", os.getenv("CONCURRENCY", "2")))

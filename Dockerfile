@@ -8,6 +8,7 @@ RUN ldconfig /usr/local/cuda-12.1/compat/
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py .
+COPY preload_models.py .
+RUN python3 /preload_models.py && rm /preload_models.py
 
 CMD ["python3", "app.py"]
