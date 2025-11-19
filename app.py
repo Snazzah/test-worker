@@ -184,9 +184,12 @@ async def transcribe(request: TranscriptionRequest):
             status_code=503
         )
 
+    start_time = time.time()
     tasks = [transcribe_clip(b64_or_url) for b64_or_url in request.audio_buffers]
     results_models = await asyncio.gather(*tasks)
     results = [r.model_dump() for r in results_models]
+    request_time = time.time() - start_time
+    print(f"Request with {len(results)} clips took {request_time}s")
     return {"results": results}
 
 # A simple endpoint to show request stats
