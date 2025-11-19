@@ -4,10 +4,12 @@ import tempfile
 import os
 import threading
 import asyncio
-from typing import Optional
+import time
+from typing import List, Optional
 from fastapi import FastAPI, Depends, Header, HTTPException, status
 from fastapi.responses import JSONResponse
 from faster_whisper import WhisperModel
+from faster_whisper.transcribe import TranscriptionInfo, Segment
 from pydantic import BaseModel
 from urllib.parse import urlparse
 import urllib.request
@@ -64,7 +66,7 @@ def buffer_or_url_to_tempfile(buf: str) -> str:
 
     return base64_to_tempfile(buf)
 
-def _run_transcribe_sync(audio_file: str) -> tuple[str, float]:
+def _run_transcribe_sync(audio_file: str) -> tuple[List[Segment], TranscriptionInfo]:
     global model
     if model is None:
         raise RuntimeError("Model not loaded")
@@ -72,7 +74,7 @@ def _run_transcribe_sync(audio_file: str) -> tuple[str, float]:
         audio_file,
         task="transcribe",
         # log_progress=True,
-        # beam_size=5,
+        beam_size=5,
         # best_of=5,
         # patience=1,
         # length_penalty=None,
@@ -83,20 +85,24 @@ def _run_transcribe_sync(audio_file: str) -> tuple[str, float]:
         # condition_on_previous_text=True,
         suppress_blank=True,
         # suppress_tokens=[-1],
-        without_timestamps=False,
+        without_timestamps=True,
         # max_initial_timestamp=1.0,
         word_timestamps=False,
         vad_filter=True,
     )
-    text = " ".join([segment.text.lstrip() for segment in segments])
-    return text, info.duration
+    return list(segments), info
 
 async def transcribe_clip(b64_or_url: str) -> "TranscriptionClipResponse":
     path = await asyncio.to_thread(buffer_or_url_to_tempfile, b64_or_url)
     try:
+        start_time = time.time()
         async with transcribe_semaphore:
-            text, duration = await asyncio.to_thread(_run_transcribe_sync, path)
-        return TranscriptionClipResponse(text=text, duration=duration)
+            segments, info = await asyncio.to_thread(_run_transcribe_sync, path)
+        transcription_time = time.time() - start_time
+        text = " ".join([segment.text.lstrip() for segment in segments])
+        output_tokens = sum(len(segment.tokens) for segment in segments)
+        print(f"Transcribed {info.duration}s clip, took {transcription_time}s, {output_tokens} tokens")
+        return TranscriptionClipResponse(text=text, duration=info.duration, output_tokens=output_tokens, transcription_time=transcription_time)
     finally:
         try:
             if path and os.path.exists(path):
@@ -128,6 +134,8 @@ class TranscriptionRequest(BaseModel):
 class TranscriptionClipResponse(BaseModel):
     text: str
     duration: float
+    output_tokens: int
+    transcription_time: float
 
 async def verify_api_key(authorization: Optional[str] = Header(None)):
     """
