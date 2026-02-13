@@ -12,7 +12,7 @@ from faster_whisper import WhisperModel
 from faster_whisper.transcribe import TranscriptionInfo, Segment
 from pydantic import BaseModel
 from urllib.parse import urlparse
-import urllib.request
+import aiohttp
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -26,12 +26,23 @@ async def load_model():
     model_name = os.getenv("MODEL_NAME", "turbo")
     device_type = os.getenv("DEVICE_TYPE", "cuda")  # "cpu", "cuda", "auto"
     compute_type = os.getenv("COMPUTE_TYPE", "float16")  # https://opennmt.net/CTranslate2/quantization.html
-    print(f"Loading model: {model_name}...")
+
+    # CTranslate2 CPU threading: split cores evenly across concurrent workers.
+    # num_workers = number of concurrent inference slots in CTranslate2's internal pool.
+    # cpu_threads = threads per inference call (intra-op parallelism).
+    num_cores = os.cpu_count() or 4
+    ct2_num_workers = CONCURRENCY
+    ct2_cpu_threads = max(1, num_cores // ct2_num_workers)
+
+    print(f"Loading model: {model_name} (device={device_type}, compute={compute_type}, "
+          f"cpu_threads={ct2_cpu_threads}, num_workers={ct2_num_workers})...")
     try:
         model = WhisperModel(
             model_name,
             device=device_type,
             compute_type=compute_type,
+            cpu_threads=ct2_cpu_threads,
+            num_workers=ct2_num_workers,
         )
         print(f"Model {model_name} loaded successfully.")
     except Exception as e:
@@ -44,7 +55,7 @@ def base64_to_tempfile(base64_file: str) -> str:
 
     return temp_file.name
 
-def buffer_or_url_to_tempfile(buf: str) -> str:
+async def buffer_or_url_to_tempfile(buf: str) -> str:
     """
     Accepts either a base64-encoded audio string or an HTTP/HTTPS URL to an audio file.
     Downloads or decodes into a temporary file and returns its path.
@@ -53,18 +64,19 @@ def buffer_or_url_to_tempfile(buf: str) -> str:
         parsed = urlparse(buf)
         if parsed.scheme in ("http", "https") and parsed.netloc:
             suffix = os.path.splitext(parsed.path)[1] or ".wav"
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tf, urllib.request.urlopen(buf, timeout=30) as resp:
-                while True:
-                    chunk = resp.read(8192)
-                    if not chunk:
-                        break
-                    tf.write(chunk)
-            return tf.name
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(buf) as resp:
+                    resp.raise_for_status()
+                    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tf:
+                        async for chunk in resp.content.iter_chunked(8192):
+                            tf.write(chunk)
+                    return tf.name
     except Exception:
         # Fall back to base64 handling if URL parsing or download fails
         pass
 
-    return base64_to_tempfile(buf)
+    return await asyncio.to_thread(base64_to_tempfile, buf)
 
 def _run_transcribe_sync(audio_file: str) -> tuple[List[Segment], TranscriptionInfo]:
     global model
@@ -74,7 +86,7 @@ def _run_transcribe_sync(audio_file: str) -> tuple[List[Segment], TranscriptionI
         audio_file,
         task="transcribe",
         # log_progress=True,
-        beam_size=5,
+        beam_size=1,
         # best_of=5,
         # patience=1,
         # length_penalty=None,
@@ -93,7 +105,7 @@ def _run_transcribe_sync(audio_file: str) -> tuple[List[Segment], TranscriptionI
     return list(segments), info
 
 async def transcribe_clip(b64_or_url: str) -> "TranscriptionClipResponse":
-    path = await asyncio.to_thread(buffer_or_url_to_tempfile, b64_or_url)
+    path = await buffer_or_url_to_tempfile(b64_or_url)
     try:
         start_time = time.time()
         async with transcribe_semaphore:
